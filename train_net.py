@@ -99,7 +99,7 @@ def run_net():
                                           transform=train_trans, frame_length=103)
     test_dataset = SevenPair_all_Dataset(class_idx_list=args.class_idx_list, score_range=100, subset='test',
                                          data_root='/hdd/1/liyuanming/ComputerVision/dataset/Seven/',
-                                         transform=test_trans, frame_length=103)
+                                         transform=test_trans, frame_length=103, num_exemplar=1)
 
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size_train,
                                                    shuffle=True, num_workers=int(args.workers),
@@ -129,44 +129,54 @@ def run_net():
                 regressor.eval()
                 torch.set_grad_enabled(False)
                 data_loader = test_dataloader
-            for (data_1, data_2) in tqdm(data_loader):
-                # Data preparing
+            for (data_1, data_2_list) in tqdm(data_loader):
+                M = len(data_2_list)
+                batch_size = data_1['final_score'].shape[0]
+                pred_score_1_sum = torch.zeros((batch_size, 1)).cuda()
+                # Data preparing for data_1
                 video_1 = data_1['video'].float().cuda()  # N, C, T, H, W
                 label_1 = data_1['final_score'].float().reshape(-1, 1).cuda()
-                video_2 = data_2['video'].float().cuda()  # N, C, T, H, W
-                label_2 = data_2['final_score'].float().reshape(-1, 1).cuda()
+                for data_2 in data_2_list:
+                    # Data preparing for data_2
+                    video_2 = data_2['video'].float().cuda()  # N, C, T, H, W
+                    label_2 = data_2['final_score'].float().reshape(-1, 1).cuda()
 
-                # Forward
-                # 1: pass backbone & attention
-                feat_1, feat_2 = base_model(video_1, video_2)  # [B, 10, 1024]
-                feature_2to1, feature_1to2 = bidir_attention(feat_1, feat_2)  # [B, 10, 1024]
-                # 2: concat features
-                cat_feat_1 = torch.cat((feat_1, feature_2to1), 2)
-                cat_feat_2 = torch.cat((feat_2, feature_1to2), 2)
-                # 3: features fusion
-                aggregated_feature_1 = cat_feat_1.mean(1)
-                aggregated_feature_2 = cat_feat_2.mean(1)
-                # 4: concat labels
-                aggregated_feature_1 = torch.cat((aggregated_feature_1, label_2), 1)
-                aggregated_feature_2 = torch.cat((aggregated_feature_2, label_1), 1)
-                # 5: regress the scores
-                pred_score_1 = regressor(aggregated_feature_1)
-                pred_score_2 = regressor(aggregated_feature_2)
+                    # Forward
+                    # 1: pass backbone & attention
+                    feat_1, feat_2 = base_model(video_1, video_2)  # [B, 10, 1024]
+                    feature_2to1, feature_1to2 = bidir_attention(feat_1, feat_2)  # [B, 10, 1024]
+                    # 2: concat features
+                    cat_feat_1 = torch.cat((feat_1, feature_2to1), 2)
+                    cat_feat_2 = torch.cat((feat_2, feature_1to2), 2)
+                    # 3: features fusion
+                    aggregated_feature_1 = cat_feat_1.mean(1)
+                    aggregated_feature_2 = cat_feat_2.mean(1)
+                    # 4: concat labels
+                    aggregated_feature_1 = torch.cat((aggregated_feature_1, label_2), 1)
+                    aggregated_feature_2 = torch.cat((aggregated_feature_2, label_1), 1)
+                    # 5: regress the scores
+                    pred_score_1 = regressor(aggregated_feature_1)
+                    pred_score_2 = regressor(aggregated_feature_2)
 
-                # Computing loss
-                loss_1 = mse(pred_score_1, label_1)
-                loss_2 = mse(pred_score_2, label_2)
-                loss = loss_1 + loss_2
+                    # Computing loss
+                    loss_1 = mse(pred_score_1, label_1)
+                    loss_2 = mse(pred_score_2, label_2)
+                    loss = loss_1 + loss_2
 
-                # Optimization
-                if step == 'train':
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
+                    # Optimization
+                    if step == 'train':
+                        optimizer.zero_grad()
+                        loss.backward()
+                        optimizer.step()
+
+                    # Summing up each score
+                    pred_score_1_sum += pred_score_1
+
+                pred_score_1_avg = pred_score_1_sum / M
 
                 # Updating score lists
                 true_scores.extend(data_1['final_score'].numpy())
-                pred_scores.extend([i.item() for i in pred_score_1])
+                pred_scores.extend([i.item() for i in pred_score_1_avg])
 
             # analysis on results
             pred_scores = np.array(pred_scores)
@@ -177,11 +187,13 @@ def run_net():
                   true_scores.shape[0]
             print('[%s] EPOCH: %d, correlation: %.4f, L2: %.4f, RL2: %.4f' % (step, epoch, rho, L2, RL2))
             # log
-            writer.add_scalar(step + ' rho', rho, epoch)
-            writer.add_scalar(step + ' L2', L2, epoch)
-            writer.add_scalar(step + ' RL2', RL2, epoch)
-            with open(args.exp_root + args.log_file, 'a') as f:
-                f.write('[%s] EPOCH: %d, correlation: %.4f, L2: %.4f, RL2: %.4f' % (step, epoch, rho, L2, RL2) + '\n')
+            if args.record_results:
+                writer.add_scalar(step + ' rho', rho, epoch)
+                writer.add_scalar(step + ' L2', L2, epoch)
+                writer.add_scalar(step + ' RL2', RL2, epoch)
+                with open(args.exp_root + args.log_file, 'a') as f:
+                    f.write('[%s] EPOCH: %d, correlation: %.4f, L2: %.4f, RL2: %.4f' % (step, epoch, rho, L2, RL2) + '\n')
+                    f.write('\n')
 
 
 if __name__ == '__main__':
@@ -193,7 +205,7 @@ if __name__ == '__main__':
                         default='/hdd/1/liyuanming/ComputerVision/pretrained_models/model_rgb.pth',
                         help='path to the checkpoint model')
     parser.add_argument("--class_idx_list", type=list,
-                        default=[2],
+                        default=[1],
                         help='path to the pretrained model')
     parser.add_argument("--batch_size_test", type=int,
                         default=2,
@@ -220,20 +232,27 @@ if __name__ == '__main__':
                         default=True,
                         help='fix bn or not')
     parser.add_argument("--max_epoch", type=int,
-                        default=300)
+                        default=200)
+    # 以下为每次实验必须仔细修改的选项
     parser.add_argument("--exp_name", type=str,
-                        default='gym_vault')
+                        default='diving_exemplar_5')
+    # 同时跑两个实验 一定 一定 一定 要改下面这一项
     parser.add_argument("--log_file", type=str,
-                        default='log.txt')
+                        default='diving_exemplar_5_log.txt')
     parser.add_argument("--exp_root", type=str,
                         default='./exp/')
+    parser.add_argument("--record_results", type=bool,
+                        default=True)
+    parser.add_argument("--num_exemplars", type=int,
+                        default=5)
     args = parser.parse_args()
 
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
-    if os.path.exists(args.exp_root + args.log_file):
-        print('Remove former log file')
-        os.remove(args.exp_root + args.log_file)
-    else:
-        print('There isn\'t a log file')
+    os.environ['CUDA_VISIBLE_DEVICES'] = '6,5'
+    if args.record_results:
+        if os.path.exists(args.exp_root + args.log_file):
+            print('Remove former log file')
+            os.remove(args.exp_root + args.log_file)
+        else:
+            print('There isn\'t a log file')
     writer = SummaryWriter('./exp/tensorboard/' + args.exp_name)
     run_net()

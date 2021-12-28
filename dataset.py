@@ -60,7 +60,7 @@ def normalize(label, class_idx, upper = 100.0):
     return norm_label
 
 class SevenPair_all_Dataset(torch.utils.data.Dataset):
-    def __init__(self, transform, class_idx_list, data_root, frame_length, subset,score_range=100):
+    def __init__(self, transform, class_idx_list, data_root, frame_length, subset,score_range=100, num_exemplar=1):
         random.seed(0)
         self.transforms = transform
         classes_name = ['diving', 'gym_vault', 'ski_big_air', 'snowboard_big_air', 'sync_diving_3m', 'sync_diving_10m']
@@ -69,6 +69,7 @@ class SevenPair_all_Dataset(torch.utils.data.Dataset):
         self.class_idx_list = class_idx_list
         self.score_range = score_range
         self.subset = subset
+        self.num_exemplars = num_exemplar
         # file path
         self.data_root = data_root
         self.data_path = [os.path.join(self.data_root, '{}-out'.format(sport_class)) for sport_class in
@@ -103,7 +104,7 @@ class SevenPair_all_Dataset(torch.utils.data.Dataset):
         action_class = int(sample_1[0])
         idx = int(sample_1[1])
         data_1 = {}
-        data_2 = {}
+
         # 暂且先将测试集合训练集的数据设为一致的
         if self.subset == 'test':
             # test phase
@@ -113,15 +114,19 @@ class SevenPair_all_Dataset(torch.utils.data.Dataset):
             data_1['action_class'] = int(sample_1[0])
             # choose data_2
             # choose a list of sample in training_set
-            train_file_list = self.split.copy()
-            tmp_idx = random.randint(0, len(train_file_list) - 1)
-            sample_2 = train_file_list[tmp_idx]
-            action_class_2 = int(sample_2[0])
-            data_2['video'] = self.load_video(int(sample_2[1]),action_class_2)
-            data_2['real_score'] = sample_2[2]
-            data_2['final_score'] = normalize(sample_2[2], action_class_2, self.score_range)
-            data_2['action_class'] = int(sample_2[0])
-            return data_1, data_2
+            exemplar_list = []
+            for i in range(self.num_exemplars):
+                data_2 = {}
+                train_file_list = self.split.copy()
+                tmp_idx = random.randint(0, len(train_file_list) - 1)
+                sample_2 = train_file_list[tmp_idx]
+                action_class_2 = int(sample_2[0])
+                data_2['video'] = self.load_video(int(sample_2[1]),action_class_2)
+                data_2['real_score'] = sample_2[2]
+                data_2['final_score'] = normalize(sample_2[2], action_class_2, self.score_range)
+                data_2['action_class'] = int(sample_2[0])
+                exemplar_list.append(data_2)
+            return data_1, exemplar_list
         else:
             # train phase
             # load video：get all the frams of the video and do transformation
@@ -131,6 +136,7 @@ class SevenPair_all_Dataset(torch.utils.data.Dataset):
             data_1['action_class'] = int(sample_1[0])
             # choose data_2
             # choose a list of sample in training_set
+            data_2 = {}
             train_file_list = self.split.copy()
             tmp_idx = random.randint(0, len(train_file_list) - 1)
             sample_2 = train_file_list[tmp_idx]
@@ -139,7 +145,7 @@ class SevenPair_all_Dataset(torch.utils.data.Dataset):
             data_2['real_score'] = sample_2[2]
             data_2['final_score'] = normalize(sample_2[2], action_class_2, self.score_range)
             data_2['action_class'] = int(sample_2[0])
-            return data_1, data_2
+            return data_1, [data_2]
 
 
     def __len__(self):
