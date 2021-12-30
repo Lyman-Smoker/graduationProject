@@ -1,5 +1,8 @@
 import torch.nn as nn
 import torch
+import os
+
+
 
 class Bidir_Attention(nn.Module):
     def __init__(self, dim=1024, mask=False):
@@ -33,8 +36,8 @@ class Bidir_Attention(nn.Module):
             _, attn_1_topk = torch.topk(attn_1, topk, sorted=True)
             _, attn_2_topk = torch.topk(attn_2, topk, sorted=True)
             # initialize mask
-            mask_1 = torch.zeros(attn_1.shape)
-            mask_2 = torch.zeros(attn_2.shape)
+            mask_1 = torch.zeros(attn_1.shape).cuda()
+            mask_2 = torch.zeros(attn_2.shape).cuda()
             for each_b in range(b):
                 mask_1[each_b] = mask_1[each_b].scatter(1, attn_1_topk[each_b], 1)
                 mask_2[each_b] = mask_2[each_b].scatter(1, attn_2_topk[each_b], 1)
@@ -50,7 +53,8 @@ class Bidir_Attention(nn.Module):
 
 
 if __name__ == '__main__':
-    ba = Bidir_Attention()
+    os.environ['CUDA_VISIBLE_DEVICES'] = '6,7,8'
+    ba = Bidir_Attention(mask=True, ln_mlp=True)
     feat1 = torch.randn(1, 10, 1024)
     feat2 = torch.randn(1, 10, 1024)
     feature_2to1, feature_1to2 = ba(feat1, feat2)

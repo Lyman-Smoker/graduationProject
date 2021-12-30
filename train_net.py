@@ -14,6 +14,7 @@ from dataset import SevenPair_all_Dataset, get_video_trans, worker_init_fn
 from models.I3D_Backbone import I3D_backbone
 from models.Bidir_Attention import Bidir_Attention
 from models.MLP import MLP
+from models.LN_MLP import LN_MLP
 # optimizer
 import torch.optim as optim
 import traceback
@@ -38,11 +39,12 @@ def fix_bn(m):
         m.eval()
 
 
-def save_checkpoint(base_model, bidir_attention, regressor, optimizer, epoch, rho_best, RL2_min, exp_name):
+def save_checkpoint(base_model, bidir_attention,ln_mlp, regressor, optimizer, epoch, rho_best, RL2_min, exp_name):
     torch.save({
         'base_model': base_model.state_dict(),
         'bidir_attention': bidir_attention.state_dict(),
         'regressor': regressor.state_dict(),
+        'ln_mlp': ln_mlp.state_dict(),
         'optimizer': optimizer.state_dict(),
         'epoch': epoch,
         'rho': rho_best,
@@ -51,7 +53,7 @@ def save_checkpoint(base_model, bidir_attention, regressor, optimizer, epoch, rh
 
 
 # resume training
-def resume_train(base_model, bidir_attention, regressor, optimizer):
+def resume_train(base_model, bidir_attention, ln_mlp, regressor, optimizer):
     ckpt_path = args.ckpt_path
     if not os.path.exists(ckpt_path):
         print('no checkpoint file from path %s...' % ckpt_path)
@@ -68,6 +70,8 @@ def resume_train(base_model, bidir_attention, regressor, optimizer):
     regressor.load_state_dict(regressor_ckpt)
     bidir_attention_ckpt = {k.replace("module.", ""): v for k, v in state_dict['bidir_attention'].items()}
     bidir_attention.load_state_dict(bidir_attention_ckpt)
+    ln_mlp_ckpt = {k.replace("module.", ""): v for k, v in state_dict['ln_mlp'].items()}
+    ln_mlp.load_state_dict(ln_mlp_ckpt)
 
     # optimizer
     optimizer.load_state_dict(state_dict['optimizer'])
@@ -88,8 +92,9 @@ def run_net():
     base_model = I3D_backbone(I3D_class=400)
     if not args.resume:
         base_model.load_pretrain(args.pretrained_i3d_weight)
-    bidir_attention = Bidir_Attention(dim=1024, mask=args.mask, ln_mlp=args.ln_mlp)
-    regressor = MLP(in_dim=2049)
+    bidir_attention = Bidir_Attention(dim=args.feature_dim, mask=args.mask)
+    ln_mlp = LN_MLP(dim=2*args.feature_dim, use_ln=args.ln, use_mlp=args.mlp)
+    regressor = MLP(in_dim=2*args.feature_dim+1)
 
     # CUDA
     global use_gpu
@@ -97,12 +102,15 @@ def run_net():
     if use_gpu:
         base_model = base_model.cuda()
         bidir_attention = bidir_attention.cuda()
+        ln_mlp = ln_mlp.cuda()
         regressor = regressor.cuda()
         torch.backends.cudnn.benchmark = True
 
     # optimizer & scheduler
     optimizer = optim.Adam([
         {'params': base_model.parameters(), 'lr': args.base_lr * args.lr_factor},
+        {'params': bidir_attention.parameters()},
+        {'params': ln_mlp.parameters()},
         {'params': regressor.parameters()}
     ], lr=args.base_lr, weight_decay=args.weight_decay)
     scheduler = None
@@ -117,13 +125,14 @@ def run_net():
 
     # load checkpoint
     if args.resume:
-        start_epoch, epoch_best, rho_best, RL2_min = resume_train(base_model, bidir_attention, regressor, optimizer)
+        start_epoch, epoch_best, rho_best, RL2_min = resume_train(base_model, bidir_attention, ln_mlp, regressor, optimizer)
         print('resume ckpts @ %d epoch( rho = %.4f, RL2 = %.4f)' % (
             start_epoch, rho_best, RL2_min))
 
     # DP
     base_model = nn.DataParallel(base_model)
     bidir_attention = nn.DataParallel(bidir_attention)
+    ln_mlp = nn.DataParallel(ln_mlp)
     regressor = nn.DataParallel(regressor)
 
     # loss
@@ -189,6 +198,8 @@ def run_net():
                     cat_feat_1 = torch.cat((feat_1, feature_2to1), 2)
                     cat_feat_2 = torch.cat((feat_2, feature_1to2), 2)
                     # 3: features fusion
+                    cat_feat_1 = ln_mlp(cat_feat_1)
+                    cat_feat_2 = ln_mlp(cat_feat_2)
                     aggregated_feature_1 = cat_feat_1.mean(1)
                     aggregated_feature_2 = cat_feat_2.mean(1)
                     # 4: concat labels
@@ -233,12 +244,12 @@ def run_net():
                     if rho > rho_best:
                         print('___________________find new best___________________')
                         rho_best = rho
-                        save_checkpoint(base_model, bidir_attention, regressor, optimizer, epoch, rho, RL2,
+                        save_checkpoint(base_model, bidir_attention, ln_mlp, regressor, optimizer, epoch, rho, RL2,
                                         args.exp_name + '_%.4f_%.4f@_%d' % (rho, RL2, epoch))
                     elif RL2 < RL2_min:
                         print('___________________find new best___________________')
                         RL2_min = RL2
-                        save_checkpoint(base_model, bidir_attention, regressor, optimizer, epoch, rho, RL2,
+                        save_checkpoint(base_model, bidir_attention, ln_mlp,regressor, optimizer, epoch, rho, RL2,
                                         args.exp_name + '_%.4f_%.4f@_%d' % (rho, RL2, epoch))
                 # log
                 writer.add_scalar(step + ' rho', rho, epoch)
@@ -259,8 +270,10 @@ if __name__ == '__main__':
                         default='../../pretrained_models/i3d_model_rgb.pth',
                         help='path to the checkpoint model')
     parser.add_argument("--class_idx_list", type=list,
-                        default=[1],
+                        default=[6],
                         help='path to the pretrained model')
+    parser.add_argument("--feature_dim", type=int,
+                        default=1024)
     parser.add_argument("--batch_size_test", type=int,
                         default=2,
                         help='batch size for testing')
@@ -289,17 +302,19 @@ if __name__ == '__main__':
                         default=300)
     # 以下为每次实验必须仔细修改的选项
     parser.add_argument("--exp_name", type=str,
-                        default='diving_ex10_ln_mlp_mask',
-                        help='action_name + num_exemplar + (ln_mlp) + (mask)')
+                        default='Sync_10m_ex10_mlp_mask',
+                        help='action_name + num_exemplar + (ln) + (mlp) + (mask)')
     # 同时跑两个实验 一定 一定 一定 要改下面这一项
     parser.add_argument("--log_file", type=str,
-                        default='diving_ex10_ln_mlp_mask_log.txt')
+                        default='Sync_10m_ex10_mlp_mask_log.txt')
     parser.add_argument("--exp_root", type=str,
                         default='./exp/')
     parser.add_argument("--record_results", type=bool,
                         default=True)
     # 消融
-    parser.add_argument("--ln_mlp", type=bool,
+    parser.add_argument("--ln", type=bool,
+                        default=False)
+    parser.add_argument("--mlp", type=bool,
                         default=True)
     parser.add_argument("--num_exemplars", type=int,
                         default=10)
