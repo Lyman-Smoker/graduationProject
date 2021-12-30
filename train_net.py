@@ -38,9 +38,47 @@ def fix_bn(m):
         m.eval()
 
 
+def save_checkpoint(base_model, bidir_attention, regressor, optimizer, epoch, rho_best, RL2_min, exp_name):
+    torch.save({
+        'base_model': base_model.state_dict(),
+        'bidir_attention': bidir_attention.state_dict(),
+        'regressor': regressor.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'epoch': epoch,
+        'rho': rho_best,
+        'RL2': RL2_min,
+    }, os.path.join('./ckpt', exp_name + '.pth'))
+
+
 # resume training
 def resume_train(base_model, bidir_attention, regressor, optimizer):
-    return
+    ckpt_path = args.ckpt_path
+    if not os.path.exists(ckpt_path):
+        print('no checkpoint file from path %s...' % ckpt_path)
+        return 0, 0, 0, 1000, 1000
+    print('Loading weights from %s...' % ckpt_path)
+
+    # load state dict
+    state_dict = torch.load(ckpt_path, map_location='cpu')
+
+    # parameter resume of base model
+    base_ckpt = {k.replace("module.", ""): v for k, v in state_dict['base_model'].items()}
+    base_model.load_state_dict(base_ckpt)
+    regressor_ckpt = {k.replace("module.", ""): v for k, v in state_dict['regressor'].items()}
+    regressor.load_state_dict(regressor_ckpt)
+    bidir_attention_ckpt = {k.replace("module.", ""): v for k, v in state_dict['bidir_attention'].items()}
+    bidir_attention.load_state_dict(bidir_attention_ckpt)
+
+    # optimizer
+    optimizer.load_state_dict(state_dict['optimizer'])
+
+    # parameter
+    start_epoch = state_dict['epoch']
+    epoch_best = state_dict['epoch']
+    rho_best = state_dict['rho']
+    RL2_min = state_dict['RL2']
+
+    return start_epoch, epoch_best, rho_best, RL2_min
 
 
 def run_net():
@@ -50,7 +88,7 @@ def run_net():
     base_model = I3D_backbone(I3D_class=400)
     if not args.resume:
         base_model.load_pretrain(args.pretrained_i3d_weight)
-    bidir_attention = Bidir_Attention(dim=1024, mask=False)
+    bidir_attention = Bidir_Attention(dim=1024, mask=args.mask, ln_mlp=args.ln_mlp)
     regressor = MLP(in_dim=2049)
 
     # CUDA
@@ -77,12 +115,11 @@ def run_net():
     L2_min = 1000
     RL2_min = 1000
 
-    # TODO: load ckpt
     # load checkpoint
     if args.resume:
-        start_epoch, epoch_best, rho_best, L2_min, RL2_min = resume_train(base_model, regressor, optimizer)
-        print('resume ckpts @ %d epoch( rho = %.4f, L2 = %.4f , RL2 = %.4f)' % (
-        start_epoch - 1, rho_best, L2_min, RL2_min))
+        start_epoch, epoch_best, rho_best, RL2_min = resume_train(base_model, bidir_attention, regressor, optimizer)
+        print('resume ckpts @ %d epoch( rho = %.4f, RL2 = %.4f)' % (
+            start_epoch, rho_best, RL2_min))
 
     # DP
     base_model = nn.DataParallel(base_model)
@@ -95,11 +132,12 @@ def run_net():
     # load data
     train_trans, test_trans = get_video_trans()
     train_dataset = SevenPair_all_Dataset(class_idx_list=args.class_idx_list, score_range=100, subset='train',
-                                          data_root='/hdd/1/liyuanming/ComputerVision/dataset/Seven/',
-                                          transform=train_trans, frame_length=103)
+                                          data_root='/home/share/AQA_7/',
+                                          # data_root='../../dataset/Seven/',
+                                          transform=train_trans, frame_length=102, num_exemplar=1)
     test_dataset = SevenPair_all_Dataset(class_idx_list=args.class_idx_list, score_range=100, subset='test',
-                                         data_root='/hdd/1/liyuanming/ComputerVision/dataset/Seven/',
-                                         transform=test_trans, frame_length=103, num_exemplar=1)
+                                         data_root='/home/share/AQA_7/',
+                                         transform=test_trans, frame_length=102, num_exemplar=args.num_exemplars)
 
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size_train,
                                                    shuffle=True, num_workers=int(args.workers),
@@ -117,6 +155,8 @@ def run_net():
             print(step + ' step:')
             true_scores = []
             pred_scores = []
+            if args.fix_bn:
+                base_model.apply(fix_bn)  # fix bn
             if step == 'train':
                 base_model.train()
                 bidir_attention.train()
@@ -186,13 +226,27 @@ def run_net():
             RL2 = np.power((pred_scores - true_scores) / (true_scores.max() - true_scores.min()), 2).sum() / \
                   true_scores.shape[0]
             print('[%s] EPOCH: %d, correlation: %.4f, L2: %.4f, RL2: %.4f' % (step, epoch, rho, L2, RL2))
-            # log
+
             if args.record_results:
+                # save checkpoint
+                if step == 'test':
+                    if rho > rho_best:
+                        print('___________________find new best___________________')
+                        rho_best = rho
+                        save_checkpoint(base_model, bidir_attention, regressor, optimizer, epoch, rho, RL2,
+                                        args.exp_name + '_%.4f_%.4f@_%d' % (rho, RL2, epoch))
+                    elif RL2 < RL2_min:
+                        print('___________________find new best___________________')
+                        RL2_min = RL2
+                        save_checkpoint(base_model, bidir_attention, regressor, optimizer, epoch, rho, RL2,
+                                        args.exp_name + '_%.4f_%.4f@_%d' % (rho, RL2, epoch))
+                # log
                 writer.add_scalar(step + ' rho', rho, epoch)
                 writer.add_scalar(step + ' L2', L2, epoch)
                 writer.add_scalar(step + ' RL2', RL2, epoch)
                 with open(args.exp_root + args.log_file, 'a') as f:
-                    f.write('[%s] EPOCH: %d, correlation: %.4f, L2: %.4f, RL2: %.4f' % (step, epoch, rho, L2, RL2) + '\n')
+                    f.write(
+                        '[%s] EPOCH: %d, correlation: %.4f, L2: %.4f, RL2: %.4f' % (step, epoch, rho, L2, RL2) + '\n')
                     f.write('\n')
 
 
@@ -202,7 +256,7 @@ if __name__ == '__main__':
                         default='./ckpt/divinglast.pth',
                         help='path to the checkpoint model')
     parser.add_argument("--pretrained_i3d_weight", type=str,
-                        default='/hdd/1/liyuanming/ComputerVision/pretrained_models/model_rgb.pth',
+                        default='../../pretrained_models/i3d_model_rgb.pth',
                         help='path to the checkpoint model')
     parser.add_argument("--class_idx_list", type=list,
                         default=[1],
@@ -211,7 +265,7 @@ if __name__ == '__main__':
                         default=2,
                         help='batch size for testing')
     parser.add_argument("--batch_size_train", type=int,
-                        default=2,
+                        default=3,
                         help='batch size for training')
     parser.add_argument("--workers", type=int,
                         default=1,
@@ -223,7 +277,7 @@ if __name__ == '__main__':
                         default=0.1,
                         help='learning rate factor')
     parser.add_argument("--weight_decay", type=float,
-                        default=0.0001,
+                        default=0.001,
                         help='weight_decay')
     parser.add_argument("--resume", type=bool,
                         default=False,
@@ -232,22 +286,28 @@ if __name__ == '__main__':
                         default=True,
                         help='fix bn or not')
     parser.add_argument("--max_epoch", type=int,
-                        default=200)
+                        default=300)
     # 以下为每次实验必须仔细修改的选项
     parser.add_argument("--exp_name", type=str,
-                        default='diving_exemplar_5')
+                        default='diving_ex10_ln_mlp_mask',
+                        help='action_name + num_exemplar + (ln_mlp) + (mask)')
     # 同时跑两个实验 一定 一定 一定 要改下面这一项
     parser.add_argument("--log_file", type=str,
-                        default='diving_exemplar_5_log.txt')
+                        default='diving_ex10_ln_mlp_mask_log.txt')
     parser.add_argument("--exp_root", type=str,
                         default='./exp/')
     parser.add_argument("--record_results", type=bool,
                         default=True)
+    # 消融
+    parser.add_argument("--ln_mlp", type=bool,
+                        default=True)
     parser.add_argument("--num_exemplars", type=int,
-                        default=5)
+                        default=10)
+    parser.add_argument("--mask", type=bool,
+                        default=True)
     args = parser.parse_args()
 
-    os.environ['CUDA_VISIBLE_DEVICES'] = '6,5'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
     if args.record_results:
         if os.path.exists(args.exp_root + args.log_file):
             print('Remove former log file')

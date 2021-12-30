@@ -60,7 +60,7 @@ def normalize(label, class_idx, upper = 100.0):
     return norm_label
 
 class SevenPair_all_Dataset(torch.utils.data.Dataset):
-    def __init__(self, transform, class_idx_list, data_root, frame_length, subset,score_range=100, num_exemplar=1):
+    def __init__(self, transform, class_idx_list, data_root, frame_length, subset, score_range=100, num_exemplar=1):
         random.seed(0)
         self.transforms = transform
         classes_name = ['diving', 'gym_vault', 'ski_big_air', 'snowboard_big_air', 'sync_diving_3m', 'sync_diving_10m']
@@ -93,10 +93,10 @@ class SevenPair_all_Dataset(torch.utils.data.Dataset):
     def load_video(self, idx, action_class):
         # self.data_path = [os.path.join(self.data_root, '{}-out'.format(sport_class)) for sport_class in
         #                   self.sport_classes]
-        video_path = os.path.join(self.data_root, '{}-out'.format(self.classes_name[action_class - 1]), '%03d' % idx)
-        # video_path = os.path.join(self.data_root, 'frames/{}'.format(self.classes_name[action_class - 1]), '%03d' % idx)   # for isee
-        video = [Image.open(os.path.join(video_path, 'img_%05d.jpg' % (i + 1))) for i in range(self.length)]
-        # video = [Image.open(os.path.join(video_path, 'image_%05d.jpg' % (i + 1))) for i in range(self.length)]    # for isee
+        # video_path = os.path.join(self.data_root, '{}-out'.format(self.classes_name[action_class - 1]), '%03d' % idx)
+        video_path = os.path.join(self.data_root, 'frames/{}'.format(self.classes_name[action_class - 1]), '%03d' % idx)   # for isee
+        # video = [Image.open(os.path.join(video_path, 'img_%05d.jpg' % (i + 1))) for i in range(self.length)]
+        video = [Image.open(os.path.join(video_path, 'image_%05d.jpg' % (i + 1))) for i in range(self.length)]    # for isee
         return self.transforms(video)
 
     def __getitem__(self, index):
