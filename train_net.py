@@ -39,7 +39,7 @@ def fix_bn(m):
         m.eval()
 
 
-def save_checkpoint(base_model, bidir_attention,ln_mlp, regressor, optimizer, epoch, rho_best, RL2_min, exp_name):
+def save_checkpoint(base_model, bidir_attention, ln_mlp, regressor, optimizer, epoch, rho_best, RL2_min, exp_name):
     torch.save({
         'base_model': base_model.state_dict(),
         'bidir_attention': bidir_attention.state_dict(),
@@ -141,11 +141,11 @@ def run_net():
     # load data
     train_trans, test_trans = get_video_trans()
     train_dataset = SevenPair_all_Dataset(class_idx_list=args.class_idx_list, score_range=100, subset='train',
-                                          data_root='/home/share/AQA_7/',
-                                          # data_root='../../dataset/Seven/',
+                                          # data_root='/home/share/AQA_7/',
+                                          data_root='../../dataset/Seven/',
                                           transform=train_trans, frame_length=102, num_exemplar=1)
     test_dataset = SevenPair_all_Dataset(class_idx_list=args.class_idx_list, score_range=100, subset='test',
-                                         data_root='/home/share/AQA_7/',
+                                         data_root='../../dataset/Seven/',
                                          transform=test_trans, frame_length=102, num_exemplar=args.num_exemplars)
 
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size_train,
@@ -170,12 +170,14 @@ def run_net():
                 base_model.train()
                 bidir_attention.train()
                 regressor.train()
+                ln_mlp.train()
                 torch.set_grad_enabled(True)
                 data_loader = train_dataloader
             else:
                 base_model.eval()
                 bidir_attention.eval()
                 regressor.eval()
+                ln_mlp.eval()
                 torch.set_grad_enabled(False)
                 data_loader = test_dataloader
             for (data_1, data_2_list) in tqdm(data_loader):
@@ -249,7 +251,7 @@ def run_net():
                     elif RL2 < RL2_min:
                         print('___________________find new best___________________')
                         RL2_min = RL2
-                        save_checkpoint(base_model, bidir_attention, ln_mlp,regressor, optimizer, epoch, rho, RL2,
+                        save_checkpoint(base_model, bidir_attention, ln_mlp, regressor, optimizer, epoch, rho, RL2,
                                         args.exp_name + '_%.4f_%.4f@_%d' % (rho, RL2, epoch))
                 # log
                 writer.add_scalar(step + ' rho', rho, epoch)
@@ -270,7 +272,7 @@ if __name__ == '__main__':
                         default='../../pretrained_models/i3d_model_rgb.pth',
                         help='path to the checkpoint model')
     parser.add_argument("--class_idx_list", type=list,
-                        default=[6],
+                        default=[5],
                         help='path to the pretrained model')
     parser.add_argument("--feature_dim", type=int,
                         default=1024)
@@ -278,7 +280,7 @@ if __name__ == '__main__':
                         default=2,
                         help='batch size for testing')
     parser.add_argument("--batch_size_train", type=int,
-                        default=3,
+                        default=2,
                         help='batch size for training')
     parser.add_argument("--workers", type=int,
                         default=1,
@@ -302,11 +304,11 @@ if __name__ == '__main__':
                         default=300)
     # 以下为每次实验必须仔细修改的选项
     parser.add_argument("--exp_name", type=str,
-                        default='Sync_10m_ex10_mlp_mask',
+                        default='sync_diving_3m_ex10_mlp',
                         help='action_name + num_exemplar + (ln) + (mlp) + (mask)')
     # 同时跑两个实验 一定 一定 一定 要改下面这一项
     parser.add_argument("--log_file", type=str,
-                        default='Sync_10m_ex10_mlp_mask_log.txt')
+                        default='sync_diving_3m_ex10_mlp_log.txt')
     parser.add_argument("--exp_root", type=str,
                         default='./exp/')
     parser.add_argument("--record_results", type=bool,
@@ -319,10 +321,10 @@ if __name__ == '__main__':
     parser.add_argument("--num_exemplars", type=int,
                         default=10)
     parser.add_argument("--mask", type=bool,
-                        default=True)
+                        default=False)
     args = parser.parse_args()
 
-    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '6,7'
     if args.record_results:
         if os.path.exists(args.exp_root + args.log_file):
             print('Remove former log file')

@@ -1,15 +1,19 @@
 import torch.nn as nn
 import torch
 import os
+import copy
 
 
 
 class Bidir_Attention(nn.Module):
-    def __init__(self, dim=1024, mask=False):
+    def __init__(self, dim=1024, mask=False, return_attn=False, detach=True):
         super(Bidir_Attention, self).__init__()
         self.qkv = nn.Linear(dim, dim * 3, bias=False)
         self.scale = 1. / dim ** 0.5
         self.use_mask = mask
+        self.vis_attn = None
+        self.return_attn = return_attn
+        self.detach=detach
 
     def forward(self, feature1, feature2, topk=4):
         """
@@ -31,8 +35,9 @@ class Bidir_Attention(nn.Module):
         # attn: [B, 10, 10]
         attn_1 = dot_1.softmax(dim=-1)
         attn_2 = dot_2.softmax(dim=-1)
+
+        # mask
         if self.use_mask:
-            # mask:
             _, attn_1_topk = torch.topk(attn_1, topk, sorted=True)
             _, attn_2_topk = torch.topk(attn_2, topk, sorted=True)
             # initialize mask
@@ -49,12 +54,18 @@ class Bidir_Attention(nn.Module):
         feature_2to1 = attn_1 @ v_2
         feature_1to2 = attn_2 @ v_1
 
-        return feature_2to1, feature_1to2
+        if not self.return_attn:
+            return feature_2to1, feature_1to2
+        elif self.detach:
+            return feature_2to1, feature_1to2, copy.deepcopy(attn_1).detach().cpu().numpy()
+        else:
+            return feature_2to1, feature_1to2, attn_1, attn_2
+
 
 
 if __name__ == '__main__':
-    os.environ['CUDA_VISIBLE_DEVICES'] = '6,7,8'
-    ba = Bidir_Attention(mask=True, ln_mlp=True)
+    # os.environ['CUDA_VISIBLE_DEVICES'] = '6,7,8'
+    ba = Bidir_Attention(dim=1024, mask=False, vis=True)
     feat1 = torch.randn(1, 10, 1024)
     feat2 = torch.randn(1, 10, 1024)
     feature_2to1, feature_1to2 = ba(feat1, feat2)

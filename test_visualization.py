@@ -12,6 +12,10 @@ from models.I3D_Backbone import I3D_backbone
 from models.Bidir_Attention import Bidir_Attention
 from models.MLP import MLP
 from models.LN_MLP import LN_MLP
+# visualization
+import seaborn as sns
+import pandas as pd
+import matplotlib.pyplot as plt
 
 # fix BatchNorm
 def fix_bn(m):
@@ -53,10 +57,10 @@ def load_checkpoint(base_model, bidir_attention, ln_mlp, regressor, optimizer):
     return start_epoch, epoch_best, rho_best, RL2_min
 
 
-ckpt_path = './ckpt/Sync_10m_ex10_mlp_mask_0.9416_0.0206@_97.pth'
+ckpt_path = './ckpt/sync_diving_10m_ex10_mlp_0.9375_0.0190@_192.pth'
 class_idx_list = [6]
 num_exemplars = 10
-os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '4'
 
 # parameter setting
 start_epoch = 0
@@ -66,12 +70,13 @@ rho_best = 0
 L2_min = 1000
 RL2_min = 1000
 mask = True
+vis = True
 
 
 
 # load model
 base_model = I3D_backbone(I3D_class=400)
-bidir_attention = Bidir_Attention(dim=1024, mask=mask)
+bidir_attention = Bidir_Attention(dim=1024, mask=mask, return_attn=vis)
 ln_mlp = LN_MLP(2048, use_ln=False, use_mlp=True)
 regressor = MLP(in_dim=2049)
 
@@ -110,20 +115,27 @@ train_trans, test_trans = get_video_trans()
 #                                           # data_root='../../dataset/Seven/',
 #                                           transform=train_trans, frame_length=102, num_exemplar=1)
 test_dataset = SevenPair_all_Dataset(class_idx_list=class_idx_list, score_range=100, subset='test',
-                                         data_root='/home/share/AQA_7/',
+                                         data_root='../../dataset/Seven/',
                                          transform=test_trans, frame_length=102, num_exemplar=num_exemplars)
 
 test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=1,
-                                                  shuffle=False, num_workers=int(1),
+                                                  shuffle=True, num_workers=int(1),
                                                   pin_memory=True)
+
+
 
 true_scores = []
 pred_scores = []
+data_1_idx = []
+data_2_idx = []
+attn_list = []
+pred_score_list = []
 
-for (data_1, data_2_list) in tqdm(test_dataloader):
+for (data_1, data_2_list) in test_dataloader:
     M = len(data_2_list)
     batch_size = data_1['final_score'].shape[0]
     pred_score_1_sum = torch.zeros((batch_size, 1)).cuda()
+    data_1_idx.append(data_1['index'].item())
     # Data preparing for data_1
     video_1 = data_1['video'].float().cuda()  # N, C, T, H, W
     label_1 = data_1['final_score'].float().reshape(-1, 1).cuda()
@@ -131,11 +143,12 @@ for (data_1, data_2_list) in tqdm(test_dataloader):
         # Data preparing for data_2
         video_2 = data_2['video'].float().cuda()  # N, C, T, H, W
         label_2 = data_2['final_score'].float().reshape(-1, 1).cuda()
+        data_2_idx.append(data_2['index'].item())
 
         # Forward
         # 1: pass backbone & attention
         feat_1, feat_2 = base_model(video_1, video_2)  # [B, 10, 1024]
-        feature_2to1, feature_1to2 = bidir_attention(feat_1, feat_2)  # [B, 10, 1024]
+        feature_2to1, feature_1to2, attn_1 = bidir_attention(feat_1, feat_2)  # [B, 10, 1024]
         # 2: concat features
         cat_feat_1 = torch.cat((feat_1, feature_2to1), 2)
         cat_feat_2 = torch.cat((feat_2, feature_1to2), 2)
@@ -154,17 +167,31 @@ for (data_1, data_2_list) in tqdm(test_dataloader):
         # Summing up each score
         pred_score_1_sum += pred_score_1
 
+        # Obtaining attention maps && recording scores
+        attn_list.append(attn_1)
+        pred_score_list.append([i.item() for i in pred_score_1][0])
+
     pred_score_1_avg = pred_score_1_sum / M
+    print('Ground-truth score:', data_1['final_score'].numpy()[0])
+    print('Predicted score:', [i.item() for i in pred_score_1_avg][0])
+    print('Predicted score list:', pred_score_list)
+    print('Data 1 index:', data_1_idx)
+    print('Data 2 index:', data_2_idx)
+    print('Length of attn_list', len(attn_list))
+    break
 
-    # Updating score lists
-    true_scores.extend(data_1['final_score'].numpy())
-    pred_scores.extend([i.item() for i in pred_score_1_avg])
+# print(attn_list[0])
+# print(attn_list[1])
 
-# analysis on results
-pred_scores = np.array(pred_scores)
-true_scores = np.array(true_scores)
-rho, p = stats.spearmanr(pred_scores, true_scores)
-L2 = np.power(pred_scores - true_scores, 2).sum() / true_scores.shape[0]
-RL2 = np.power((pred_scores - true_scores) / (true_scores.max() - true_scores.min()), 2).sum() / \
-      true_scores.shape[0]
-print('Correlation: %.4f, L2: %.4f, RL2: %.4f' % (rho, L2, RL2))
+fig, ax = plt.subplots(figsize=(9, 9))
+# 二维的数组的热力图，横轴和数轴的ticklabels要加上去的话，既可以通过将array转换成有column
+# 和index的DataFrame直接绘图生成，也可以后续再加上去。后面加上去的话，更灵活，包括可设置labels大小方向等。
+for i in range(10):
+    print('saving {}_{}_{}.png'.format(class_idx_list[0], data_1_idx[0], data_2_idx[i]))
+    sns.heatmap(
+        pd.DataFrame(np.round(attn_list[i][0], 4)), annot=True, vmax=1, vmin=0, xticklabels=True, yticklabels=True, square=True, cmap="Blues", annot_kws={'size': 6})
+    plt.savefig('./visualization/{}_{}_{}.png'.format(class_idx_list[0], data_1_idx[0], data_2_idx[i]))
+    # plt.show()
+    plt.close()
+
+
