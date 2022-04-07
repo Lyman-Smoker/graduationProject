@@ -7,7 +7,7 @@ from tqdm import tqdm
 from scipy import stats
 import random
 from dataset import SevenPair_all_Dataset, get_video_trans, worker_init_fn
-# model
+# models
 from models.I3D_Backbone import I3D_backbone
 from models.Bidir_Attention import Bidir_Attention
 from models.MLP import MLP
@@ -21,7 +21,7 @@ def fix_bn(m):
 
 
 # load checkpoint
-def load_checkpoint(base_model, bidir_attention, ln_mlp, regressor, optimizer):
+def load_checkpoint(base_model, bidir_attention, ln_mlp, regressor):
     if not os.path.exists(ckpt_path):
         print('no checkpoint file from path %s...' % ckpt_path)
         return 0, 0, 0, 1000, 1000
@@ -31,7 +31,7 @@ def load_checkpoint(base_model, bidir_attention, ln_mlp, regressor, optimizer):
     state_dict = torch.load(ckpt_path, map_location='cpu')
     print(state_dict.keys())
 
-    # parameter resume of base model
+    # parameter resume of base models
     base_ckpt = {k.replace("module.", ""): v for k, v in state_dict['base_model'].items()}
     base_model.load_state_dict(base_ckpt)
     regressor_ckpt = {k.replace("module.", ""): v for k, v in state_dict['regressor'].items()}
@@ -40,9 +40,6 @@ def load_checkpoint(base_model, bidir_attention, ln_mlp, regressor, optimizer):
     bidir_attention.load_state_dict(bidir_attention_ckpt)
     ln_mlp_ckpt = {k.replace("module.", ""): v for k, v in state_dict['ln_mlp'].items()}
     ln_mlp.load_state_dict(ln_mlp_ckpt)
-
-    # optimizer
-    optimizer.load_state_dict(state_dict['optimizer'])
 
     # parameter
     start_epoch = state_dict['epoch']
@@ -53,10 +50,10 @@ def load_checkpoint(base_model, bidir_attention, ln_mlp, regressor, optimizer):
     return start_epoch, epoch_best, rho_best, RL2_min
 
 
-ckpt_path = './ckpt/Sync_10m_ex10_mlp_mask_0.9416_0.0206@_97.pth'
+ckpt_path = './ckpt/coat-mlp-sync-10m-div/core-mlp-sync-10m-div_0.9024_0.0360@_199.pth'
 class_idx_list = [6]
 num_exemplars = 10
-os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
 
 # parameter setting
 start_epoch = 0
@@ -65,24 +62,24 @@ epoch_best = 0
 rho_best = 0
 L2_min = 1000
 RL2_min = 1000
-mask = True
+mask = False
+vis = True
 
 
-
-# load model
+# load models
 base_model = I3D_backbone(I3D_class=400)
-bidir_attention = Bidir_Attention(dim=1024, mask=mask)
+bidir_attention = Bidir_Attention(dim=1024, mask=mask, return_attn=vis)
 ln_mlp = LN_MLP(2048, use_ln=False, use_mlp=True)
 regressor = MLP(in_dim=2049)
 
-# optimizer & scheduler
-optimizer = optim.Adam([
-    {'params': base_model.parameters(), 'lr':0.001 * 0.1},
-    {'params': bidir_attention.parameters()},
-    {'params': ln_mlp.parameters()},
-    {'params': regressor.parameters()}
-    ], lr=0.001, weight_decay=0.001)
-start_epoch, epoch_best, rho_best, RL2_min = load_checkpoint(base_model, bidir_attention, ln_mlp, regressor, optimizer)
+# # optimizer & scheduler
+# optimizer = optim.Adam([
+#     {'params': base_model.parameters(), 'lr':0.001 * 0.1},
+#     {'params': bidir_attention.parameters()},
+#     {'params': ln_mlp.parameters()},
+#     {'params': regressor.parameters()}
+#     ], lr=0.001, weight_decay=0.001)
+start_epoch, epoch_best, rho_best, RL2_min = load_checkpoint(base_model, bidir_attention, ln_mlp, regressor)
 print('resume ckpts @ %d epoch( rho = %.4f, RL2 = %.4f)' % (start_epoch, rho_best, RL2_min))
 
 # CUDA & DP
@@ -109,8 +106,8 @@ train_trans, test_trans = get_video_trans()
 #                                           data_root='/home/share/AQA_7/',
 #                                           # data_root='../../dataset/Seven/',
 #                                           transform=train_trans, frame_length=102, num_exemplar=1)
-test_dataset = SevenPair_all_Dataset(class_idx_list=class_idx_list, score_range=100, subset='test',
-                                         data_root='/home/share/AQA_7/',
+test_dataset = SevenPair_all_Dataset(class_idx_list=class_idx_list, score_range=5, subset='test',
+                                         data_root='/mnt/gdata/AQA/AQA-7/',
                                          transform=test_trans, frame_length=102, num_exemplar=num_exemplars)
 
 test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=1,
@@ -135,7 +132,7 @@ for (data_1, data_2_list) in tqdm(test_dataloader):
         # Forward
         # 1: pass backbone & attention
         feat_1, feat_2 = base_model(video_1, video_2)  # [B, 10, 1024]
-        feature_2to1, feature_1to2 = bidir_attention(feat_1, feat_2)  # [B, 10, 1024]
+        feature_2to1, feature_1to2, attn1, atttn2 = bidir_attention(feat_1, feat_2)  # [B, 10, 1024]
         # 2: concat features
         cat_feat_1 = torch.cat((feat_1, feature_2to1), 2)
         cat_feat_2 = torch.cat((feat_2, feature_1to2), 2)

@@ -8,6 +8,11 @@ import numpy as np
 from pydoc import locate
 from torchvideotransforms import video_transforms, volume_transforms
 
+torch.manual_seed(0)
+torch.cuda.manual_seed_all(0)
+random.seed(0)
+np.random.seed(0)
+torch.backends.cudnn.deterministic = True
 
 def get_video_trans():
     train_trans = video_transforms.Compose([
@@ -60,7 +65,7 @@ def normalize(label, class_idx, upper = 100.0):
     return norm_label
 
 class SevenPair_all_Dataset(torch.utils.data.Dataset):
-    def __init__(self, transform, class_idx_list, data_root, frame_length, subset, score_range=100, num_exemplar=1):
+    def __init__(self, transform, class_idx_list, data_root, frame_length, subset,score_range=100, num_exemplar=1):
         random.seed(0)
         self.transforms = transform
         classes_name = ['diving', 'gym_vault', 'ski_big_air', 'snowboard_big_air', 'sync_diving_3m', 'sync_diving_10m']
@@ -104,6 +109,7 @@ class SevenPair_all_Dataset(torch.utils.data.Dataset):
         action_class = int(sample_1[0])
         idx = int(sample_1[1])
         data_1 = {}
+        data_1['index'] = idx
 
         # 暂且先将测试集合训练集的数据设为一致的
         if self.subset == 'test':
@@ -125,6 +131,7 @@ class SevenPair_all_Dataset(torch.utils.data.Dataset):
                 data_2['real_score'] = sample_2[2]
                 data_2['final_score'] = normalize(sample_2[2], action_class_2, self.score_range)
                 data_2['action_class'] = int(sample_2[0])
+                data_2['index'] = int(sample_2[1])
                 exemplar_list.append(data_2)
             return data_1, exemplar_list
         else:

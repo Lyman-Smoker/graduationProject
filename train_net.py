@@ -10,7 +10,7 @@ import time
 import copy
 # dataset
 from dataset import SevenPair_all_Dataset, get_video_trans, worker_init_fn
-# model
+# models
 from models.I3D_Backbone import I3D_backbone
 from models.Bidir_Attention import Bidir_Attention
 from models.MLP import MLP
@@ -25,9 +25,9 @@ import matplotlib.pyplot as plt
 
 mpl.use('Agg')
 
-torch.manual_seed(0);
-torch.cuda.manual_seed_all(0);
-random.seed(0);
+torch.manual_seed(0)
+torch.cuda.manual_seed_all(0)
+random.seed(0)
 np.random.seed(0)
 torch.backends.cudnn.deterministic = True
 
@@ -39,21 +39,51 @@ def fix_bn(m):
         m.eval()
 
 
-def save_checkpoint(base_model, bidir_attention, ln_mlp, regressor, optimizer, epoch, rho_best, RL2_min, exp_name):
+#constraint the learing of attention module
+def diversity_loss(attention):
+    attention_t = torch.transpose(attention, 1, 2)
+    num_features = attention.shape[1]
+    # res = torch.matmul(attention_t.view(-1, args.num_filters, num_features), attention.view(-1, num_features, args.num_filters)) - torch.eye(args.num_filters).cuda()
+    res = (attention @ attention_t) - torch.eye(num_features).cuda()
+    res = res.view(-1, num_features*num_features)
+    return torch.norm(res, p=2, dim=1).sum() / attention.size(0)
+
+# constraint the learing of attention module
+def diversity_loss_2(attention):
+    attention_t = torch.transpose(attention, 1, 2)
+    num_features = attention.shape[1]
+    # res = torch.matmul(attention_t.view(-1, args.num_filters, num_features), attention.view(-1, num_features, args.num_filters)) - torch.eye(args.num_filters).cuda()
+    res = (attention @ attention_t).softmax(dim=-1) - torch.eye(num_features).cuda()
+    res = res.view(-1, num_features*num_features)
+    return torch.norm(res, p=2, dim=1).sum() / attention.size(0)
+
+def diversity_loss_3(attention):
+    attention_t = torch.transpose(attention, 1, 2)
+    num_features = attention.shape[1]
+    # res = torch.matmul(attention_t.view(-1, args.num_filters, num_features), attention.view(-1, num_features, args.num_filters)) - torch.eye(args.num_filters).cuda()
+    res = (attention @ attention_t)
+    dis = torch.norm(attention, 2, 2)
+    dis = dis.unsqueeze(-1)
+    dis_mask = dis @ dis.transpose(1, 2)
+    res = res / dis_mask
+    res = res - torch.eye(num_features).cuda()
+    res = res.view(-1, num_features*num_features)
+    return torch.norm(res, p=2, dim=1).sum() / attention.size(0)
+
+def save_checkpoint(base_model, bidir_attention, ln_mlp, regressor, epoch, rho_best, RL2_min, exp_name):
     torch.save({
         'base_model': base_model.state_dict(),
         'bidir_attention': bidir_attention.state_dict(),
         'regressor': regressor.state_dict(),
         'ln_mlp': ln_mlp.state_dict(),
-        'optimizer': optimizer.state_dict(),
         'epoch': epoch,
         'rho': rho_best,
         'RL2': RL2_min,
-    }, os.path.join('./ckpt', exp_name + '.pth'))
+    }, os.path.join('./ckpt' + '/' + args.exp_name , exp_name + '.pth'))
 
 
 # resume training
-def resume_train(base_model, bidir_attention, ln_mlp, regressor, optimizer):
+def resume_train(base_model, bidir_attention, ln_mlp, regressor):
     ckpt_path = args.ckpt_path
     if not os.path.exists(ckpt_path):
         print('no checkpoint file from path %s...' % ckpt_path)
@@ -63,7 +93,7 @@ def resume_train(base_model, bidir_attention, ln_mlp, regressor, optimizer):
     # load state dict
     state_dict = torch.load(ckpt_path, map_location='cpu')
 
-    # parameter resume of base model
+    # parameter resume of base models
     base_ckpt = {k.replace("module.", ""): v for k, v in state_dict['base_model'].items()}
     base_model.load_state_dict(base_ckpt)
     regressor_ckpt = {k.replace("module.", ""): v for k, v in state_dict['regressor'].items()}
@@ -72,9 +102,6 @@ def resume_train(base_model, bidir_attention, ln_mlp, regressor, optimizer):
     bidir_attention.load_state_dict(bidir_attention_ckpt)
     ln_mlp_ckpt = {k.replace("module.", ""): v for k, v in state_dict['ln_mlp'].items()}
     ln_mlp.load_state_dict(ln_mlp_ckpt)
-
-    # optimizer
-    optimizer.load_state_dict(state_dict['optimizer'])
 
     # parameter
     start_epoch = state_dict['epoch']
@@ -88,11 +115,11 @@ def resume_train(base_model, bidir_attention, ln_mlp, regressor, optimizer):
 def run_net():
     print('Runner starting ... ')
 
-    # load model
+    # load models
     base_model = I3D_backbone(I3D_class=400)
     if not args.resume:
         base_model.load_pretrain(args.pretrained_i3d_weight)
-    bidir_attention = Bidir_Attention(dim=args.feature_dim, mask=args.mask)
+    bidir_attention = Bidir_Attention(dim=args.feature_dim, mask=args.mask, return_attn=args.div_loss)
     ln_mlp = LN_MLP(dim=2*args.feature_dim, use_ln=args.ln, use_mlp=args.mlp)
     regressor = MLP(in_dim=2*args.feature_dim+1)
 
@@ -107,12 +134,18 @@ def run_net():
         torch.backends.cudnn.benchmark = True
 
     # optimizer & scheduler
-    optimizer = optim.Adam([
-        {'params': base_model.parameters(), 'lr': args.base_lr * args.lr_factor},
-        {'params': bidir_attention.parameters()},
-        {'params': ln_mlp.parameters()},
-        {'params': regressor.parameters()}
-    ], lr=args.base_lr, weight_decay=args.weight_decay)
+    if args.attn:
+        optimizer = optim.Adam([
+            {'params': base_model.parameters(), 'lr': args.base_lr * args.lr_factor},
+            {'params': bidir_attention.parameters()},
+            {'params': ln_mlp.parameters()},
+            {'params': regressor.parameters()}
+        ], lr=args.base_lr, weight_decay=args.weight_decay)
+    else:
+        optimizer = optim.Adam([
+            {'params': base_model.parameters(), 'lr': args.base_lr * args.lr_factor},
+            {'params': regressor.parameters()}
+        ], lr=args.base_lr, weight_decay=args.weight_decay)
     scheduler = None
 
     # parameter setting
@@ -140,12 +173,12 @@ def run_net():
 
     # load data
     train_trans, test_trans = get_video_trans()
-    train_dataset = SevenPair_all_Dataset(class_idx_list=args.class_idx_list, score_range=100, subset='train',
+    train_dataset = SevenPair_all_Dataset(class_idx_list=args.class_idx_list, score_range=5, subset='train',
                                           # data_root='/home/share/AQA_7/',
-                                          data_root='../../dataset/Seven/',
+                                          data_root='/mnt/gdata/AQA/AQA-7/',
                                           transform=train_trans, frame_length=102, num_exemplar=1)
-    test_dataset = SevenPair_all_Dataset(class_idx_list=args.class_idx_list, score_range=100, subset='test',
-                                         data_root='../../dataset/Seven/',
+    test_dataset = SevenPair_all_Dataset(class_idx_list=args.class_idx_list, score_range=5, subset='test',
+                                         data_root='/mnt/gdata/AQA/AQA-7/',
                                          transform=test_trans, frame_length=102, num_exemplar=args.num_exemplars)
 
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size_train,
@@ -195,15 +228,25 @@ def run_net():
                     # Forward
                     # 1: pass backbone & attention
                     feat_1, feat_2 = base_model(video_1, video_2)  # [B, 10, 1024]
-                    feature_2to1, feature_1to2 = bidir_attention(feat_1, feat_2)  # [B, 10, 1024]
-                    # 2: concat features
-                    cat_feat_1 = torch.cat((feat_1, feature_2to1), 2)
-                    cat_feat_2 = torch.cat((feat_2, feature_1to2), 2)
-                    # 3: features fusion
-                    cat_feat_1 = ln_mlp(cat_feat_1)
-                    cat_feat_2 = ln_mlp(cat_feat_2)
-                    aggregated_feature_1 = cat_feat_1.mean(1)
-                    aggregated_feature_2 = cat_feat_2.mean(1)
+                    if args.attn:
+                        if args.div_loss:
+                            feature_2to1, feature_1to2, attn_1, attn_2 = bidir_attention(feat_1, feat_2)  # [B, 10, 1024]
+                        else:
+                            feature_2to1, feature_1to2 = bidir_attention(feat_1, feat_2)  # [B, 10, 1024]
+                        # 2: concat features
+                        cat_feat_1 = torch.cat((feat_1, feature_2to1), 2)
+                        cat_feat_2 = torch.cat((feat_2, feature_1to2), 2)
+                        # 3: features fusion
+                        cat_feat_1 = ln_mlp(cat_feat_1)
+                        cat_feat_2 = ln_mlp(cat_feat_2)
+                        aggregated_feature_1 = cat_feat_1.mean(1)
+                        aggregated_feature_2 = cat_feat_2.mean(1)
+                    else:
+                        # 2: concat features
+                        cat_feat_1 = torch.cat((feat_1, feat_2), 2)
+                        cat_feat_2 = torch.cat((feat_2, feat_1), 2)
+                        aggregated_feature_1 = cat_feat_1.mean(1)
+                        aggregated_feature_2 = cat_feat_2.mean(1)
                     # 4: concat labels
                     aggregated_feature_1 = torch.cat((aggregated_feature_1, label_2), 1)
                     aggregated_feature_2 = torch.cat((aggregated_feature_2, label_1), 1)
@@ -211,10 +254,14 @@ def run_net():
                     pred_score_1 = regressor(aggregated_feature_1)
                     pred_score_2 = regressor(aggregated_feature_2)
 
+                        
+
                     # Computing loss
                     loss_1 = mse(pred_score_1, label_1)
                     loss_2 = mse(pred_score_2, label_2)
                     loss = loss_1 + loss_2
+                    if args.div_loss:
+                        loss += args.div_loss_lambda * (diversity_loss_3(attn_1) + diversity_loss_3(attn_2))
 
                     # Optimization
                     if step == 'train':
@@ -246,13 +293,10 @@ def run_net():
                     if rho > rho_best:
                         print('___________________find new best___________________')
                         rho_best = rho
-                        save_checkpoint(base_model, bidir_attention, ln_mlp, regressor, optimizer, epoch, rho, RL2,
-                                        args.exp_name + '_%.4f_%.4f@_%d' % (rho, RL2, epoch))
-                    elif RL2 < RL2_min:
-                        print('___________________find new best___________________')
                         RL2_min = RL2
-                        save_checkpoint(base_model, bidir_attention, ln_mlp, regressor, optimizer, epoch, rho, RL2,
+                        save_checkpoint(base_model, bidir_attention, ln_mlp, regressor, epoch, rho, RL2,
                                         args.exp_name + '_%.4f_%.4f@_%d' % (rho, RL2, epoch))
+
                 # log
                 writer.add_scalar(step + ' rho', rho, epoch)
                 writer.add_scalar(step + ' L2', L2, epoch)
@@ -260,30 +304,32 @@ def run_net():
                 with open(args.exp_root + args.log_file, 'a') as f:
                     f.write(
                         '[%s] EPOCH: %d, correlation: %.4f, L2: %.4f, RL2: %.4f' % (step, epoch, rho, L2, RL2) + '\n')
-                    f.write('\n')
+
+        with open(args.exp_root + args.log_file, 'a') as f:
+            f.write('\n')
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="test the model")
+    parser = argparse.ArgumentParser(description="test the models")
     parser.add_argument("--ckpt_path", type=str,
                         default='./ckpt/divinglast.pth',
-                        help='path to the checkpoint model')
+                        help='path to the checkpoint models')
     parser.add_argument("--pretrained_i3d_weight", type=str,
-                        default='../../pretrained_models/i3d_model_rgb.pth',
-                        help='path to the checkpoint model')
+                        default='../pretrained_models/i3d_model_rgb.pth',
+                        help='path to the checkpoint models')
     parser.add_argument("--class_idx_list", type=list,
-                        default=[5],
-                        help='path to the pretrained model')
+                        default=[1],
+                        help='path to the pretrained models')
     parser.add_argument("--feature_dim", type=int,
                         default=1024)
     parser.add_argument("--batch_size_test", type=int,
-                        default=2,
+                        default=4,
                         help='batch size for testing')
     parser.add_argument("--batch_size_train", type=int,
-                        default=2,
+                        default=6,
                         help='batch size for training')
     parser.add_argument("--workers", type=int,
-                        default=1,
+                        default=32,
                         help='number of dataloader workers')
     parser.add_argument("--base_lr", type=float,
                         default=0.001,
@@ -292,7 +338,7 @@ if __name__ == '__main__':
                         default=0.1,
                         help='learning rate factor')
     parser.add_argument("--weight_decay", type=float,
-                        default=0.001,
+                        default=0.00001,
                         help='weight_decay')
     parser.add_argument("--resume", type=bool,
                         default=False,
@@ -301,19 +347,26 @@ if __name__ == '__main__':
                         default=True,
                         help='fix bn or not')
     parser.add_argument("--max_epoch", type=int,
-                        default=300)
+                        default=200)
+    parser.add_argument("--div_loss_lambda", type=int,
+                        default=0.8,
+                        help='[0.1,0.3,0.5,0.7,1,3,5,7]')                        
     # 以下为每次实验必须仔细修改的选项
     parser.add_argument("--exp_name", type=str,
-                        default='sync_diving_3m_ex10_mlp',
-                        help='action_name + num_exemplar + (ln) + (mlp) + (mask)')
+                        default='sync_diving_10m_ex1_attn_mask_divLoss3_lamda1',
+                        help='action_name + num_exemplar + (attn) + (mask) + (loss)')
     # 同时跑两个实验 一定 一定 一定 要改下面这一项
     parser.add_argument("--log_file", type=str,
-                        default='sync_diving_3m_ex10_mlp_log.txt')
+                        default='sync_diving_10m_ex1_attn_mask_divLoss3_lamda1_log.txt')
     parser.add_argument("--exp_root", type=str,
                         default='./exp/')
     parser.add_argument("--record_results", type=bool,
                         default=True)
+    parser.add_argument("--gpus", type=str,
+                        default='0')
     # 消融
+    parser.add_argument("--attn", type=bool,
+                        default=True)
     parser.add_argument("--ln", type=bool,
                         default=False)
     parser.add_argument("--mlp", type=bool,
@@ -322,9 +375,12 @@ if __name__ == '__main__':
                         default=10)
     parser.add_argument("--mask", type=bool,
                         default=False)
+    parser.add_argument("--div_loss", type=bool,
+                        default=True)
+                    
     args = parser.parse_args()
 
-    os.environ['CUDA_VISIBLE_DEVICES'] = '6,7'
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus
     if args.record_results:
         if os.path.exists(args.exp_root + args.log_file):
             print('Remove former log file')
@@ -333,3 +389,7 @@ if __name__ == '__main__':
             print('There isn\'t a log file')
     writer = SummaryWriter('./exp/tensorboard/' + args.exp_name)
     run_net()
+
+# python train_net.py --exp_name core-mlp-ski --log_file core-mlp-ski-log.txt --gpus 0,1,2,3
+
+# python train_net.py --exp_name core-mlp-ski-div --log_file core-mlp-ski-div-log.txt --gpus 0,1,2,3

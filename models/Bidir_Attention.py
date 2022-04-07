@@ -6,7 +6,7 @@ import copy
 
 
 class Bidir_Attention(nn.Module):
-    def __init__(self, dim=1024, mask=False, return_attn=False, detach=True):
+    def __init__(self, dim=1024, mask=False, return_attn=False, detach=False):
         super(Bidir_Attention, self).__init__()
         self.qkv = nn.Linear(dim, dim * 3, bias=False)
         self.scale = 1. / dim ** 0.5

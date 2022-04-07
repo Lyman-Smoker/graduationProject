@@ -7,5 +7,5 @@ def fisher_z(score_list):
 	final_score = (np.e**(2*mean_z)-1) / (np.e**(2*mean_z)+1)
 	return final_score
 
-li = [0.86, 0.8050,0.6483,0.8757,0.9330,0.9316]
+li = [0.8802,0.8041,0.6612,0.5707,0.9126,0.9088]
 print(fisher_z(li))
